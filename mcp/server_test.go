@@ -95,9 +95,11 @@ func TestToolsList(t *testing.T) {
 	for _, want := range []string{
 		"list_datasets", "get_dataset_info", "query_features", "get_feature",
 		"upload_dataset", "run_process", "run_pipeline", "convert_format",
-		"diff_datasets", "execute_sql", "list_spatial_tables", "geocode",
-		"reverse_geocode", "compute_route", "list_operations",
-		"browse_catalog", "import_from_catalog", "browse_stac_catalog",
+		"diff_datasets", "execute_sql", "list_spatial_tables", "get_duckdb_info",
+		"list_duckdb_datasets", "geocode", "reverse_geocode", "compute_route",
+		"compute_isochrone", "compute_route_matrix", "compute_service_area",
+		"list_operations", "browse_catalog", "browse_catalog_enhanced",
+		"get_catalog_entry", "list_catalog_categories", "list_catalog_tags", "import_from_catalog", "browse_stac_catalog",
 		"browse_stac_collections", "browse_stac_items", "import_stac_asset",
 		"search_stac",
 	} {
@@ -179,13 +181,13 @@ func TestToolsCall_QueryFeatures(t *testing.T) {
 
 func TestToolsCall_ExecuteSQL(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/sql/query", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/query/sql", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Query string `json:"query"`
+			SQL string `json:"sql"`
 		}
 		json.NewDecoder(r.Body).Decode(&body)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"columns":["count"],"rows":[[42]],"query":"%s"}`, body.Query)
+		fmt.Fprintf(w, `{"columns":["count"],"rows":[[42]],"sql":"%s"}`, body.SQL)
 	})
 	srv := testServer(t, mux)
 
@@ -209,6 +211,235 @@ func TestToolsCall_ExecuteSQL(t *testing.T) {
 	text, _ := first["text"].(string)
 	if !strings.Contains(text, "42") {
 		t.Errorf("response should contain '42', got: %s", text)
+	}
+}
+
+func TestToolsCall_ConvertFormat_MapsFormatToOutputFormat(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/convert", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		if body["output_format"] != "parquet" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"missing output_format"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"message":"conversion complete"}`)
+	})
+	srv := testServer(t, mux)
+
+	resp := sendRequest(t, srv, "tools/call", 13, map[string]interface{}{
+		"name": "convert_format",
+		"arguments": map[string]interface{}{
+			"input":  "parks",
+			"format": "parquet",
+		},
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	result, _ := resp.Result.(map[string]interface{})
+	isErr, _ := result["isError"].(bool)
+	if isErr {
+		t.Fatalf("expected success result, got error: %+v", result)
+	}
+}
+
+func TestToolsCall_DiffDatasets_MapsBaseCompare(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/diff", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		if body["left"] != "v1" || body["right"] != "v2" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"missing left/right"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"added":1,"removed":0,"modified":2}`)
+	})
+	srv := testServer(t, mux)
+
+	resp := sendRequest(t, srv, "tools/call", 14, map[string]interface{}{
+		"name": "diff_datasets",
+		"arguments": map[string]interface{}{
+			"base":    "v1",
+			"compare": "v2",
+		},
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	result, _ := resp.Result.(map[string]interface{})
+	isErr, _ := result["isError"].(bool)
+	if isErr {
+		t.Fatalf("expected success result, got error: %+v", result)
+	}
+}
+
+func TestToolsCall_ComputeRoute_MapsOriginDestination(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/route", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Waypoints [][2]float64 `json:"waypoints"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Waypoints) != 2 {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"expected 2 waypoints"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"distance":1000,"duration":120}`)
+	})
+	srv := testServer(t, mux)
+
+	resp := sendRequest(t, srv, "tools/call", 15, map[string]interface{}{
+		"name": "compute_route",
+		"arguments": map[string]interface{}{
+			"origin":      map[string]interface{}{"lat": 39.0, "lon": -86.0},
+			"destination": map[string]interface{}{"lat": 39.1, "lon": -86.1},
+		},
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	result, _ := resp.Result.(map[string]interface{})
+	isErr, _ := result["isError"].(bool)
+	if isErr {
+		t.Fatalf("expected success result, got error: %+v", result)
+	}
+}
+
+func TestToolsCall_ComputeRouteMatrix_MapsPoints(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/route/matrix", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Origins      [][2]float64 `json:"origins"`
+			Destinations [][2]float64 `json:"destinations"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Origins) != 1 || len(body.Destinations) != 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"expected origins/destinations"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"durations":[[120]],"distances":[[1000]]}`)
+	})
+	srv := testServer(t, mux)
+
+	resp := sendRequest(t, srv, "tools/call", 16, map[string]interface{}{
+		"name": "compute_route_matrix",
+		"arguments": map[string]interface{}{
+			"origins":      []interface{}{map[string]interface{}{"lat": 39.0, "lon": -86.0}},
+			"destinations": []interface{}{map[string]interface{}{"lat": 39.1, "lon": -86.1}},
+		},
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	result, _ := resp.Result.(map[string]interface{})
+	isErr, _ := result["isError"].(bool)
+	if isErr {
+		t.Fatalf("expected success result, got error: %+v", result)
+	}
+}
+
+func TestToolsCall_ComputeIsochrone_MapsOrigin(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/route/isochrone", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		if body["lng"] == nil || body["lat"] == nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"missing lng/lat"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"type":"FeatureCollection","features":[]}`)
+	})
+	srv := testServer(t, mux)
+
+	resp := sendRequest(t, srv, "tools/call", 17, map[string]interface{}{
+		"name": "compute_isochrone",
+		"arguments": map[string]interface{}{
+			"origin":  map[string]interface{}{"lat": 39.0, "lon": -86.0},
+			"minutes": []interface{}{10.0, 20.0},
+		},
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	result, _ := resp.Result.(map[string]interface{})
+	isErr, _ := result["isError"].(bool)
+	if isErr {
+		t.Fatalf("expected success result, got error: %+v", result)
+	}
+}
+
+func TestToolsCall_GetDuckDBInfo(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/query/sql/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"available"}`)
+	})
+	srv := testServer(t, mux)
+
+	resp := sendRequest(t, srv, "tools/call", 18, map[string]interface{}{
+		"name":      "get_duckdb_info",
+		"arguments": map[string]interface{}{},
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	result, _ := resp.Result.(map[string]interface{})
+	content, _ := result["content"].([]interface{})
+	first, _ := content[0].(map[string]interface{})
+	text, _ := first["text"].(string)
+	if !strings.Contains(text, "available") {
+		t.Errorf("response should contain duckdb status, got: %s", text)
+	}
+}
+
+func TestToolsCall_BrowseEnhancedCatalog(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/catalog/enhanced", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("live_only") != "true" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"missing live_only"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"id":"us-census","name":"US Census"}]`)
+	})
+	srv := testServer(t, mux)
+
+	resp := sendRequest(t, srv, "tools/call", 19, map[string]interface{}{
+		"name": "browse_catalog_enhanced",
+		"arguments": map[string]interface{}{
+			"search":    "census",
+			"live_only": true,
+		},
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	result, _ := resp.Result.(map[string]interface{})
+	content, _ := result["content"].([]interface{})
+	first, _ := content[0].(map[string]interface{})
+	text, _ := first["text"].(string)
+	if !strings.Contains(text, "us-census") {
+		t.Errorf("response should contain 'us-census', got: %s", text)
 	}
 }
 
@@ -310,7 +541,7 @@ func TestToolsCall_ImportSTACAsset(t *testing.T) {
 		}
 		json.NewDecoder(r.Body).Decode(&body)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusAccepted)
 		fmt.Fprintf(w, `{"name":"%s","path":"data/%s.geojson","format":"geojson"}`, body.Name, body.Name)
 	})
 	srv := testServer(t, mux)

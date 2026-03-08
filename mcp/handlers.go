@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 )
 
 // HandleToolCall dispatches a tool call to the appropriate handler and returns
@@ -45,16 +46,34 @@ func HandleToolCall(client *Client, name string, args json.RawMessage) (string, 
 		return handleExecuteSQL(client, params)
 	case "list_spatial_tables":
 		return handleListSpatialTables(client)
+	case "get_duckdb_info":
+		return handleGetDuckDBInfo(client)
+	case "list_duckdb_datasets":
+		return handleListDuckDBDatasets(client)
 	case "geocode":
 		return handleGeocode(client, params)
 	case "reverse_geocode":
 		return handleReverseGeocode(client, params)
 	case "compute_route":
 		return handleComputeRoute(client, params)
+	case "compute_isochrone":
+		return handleComputeIsochrone(client, params)
+	case "compute_route_matrix":
+		return handleComputeRouteMatrix(client, params)
+	case "compute_service_area":
+		return handleComputeServiceArea(client, params)
 	case "list_operations":
 		return handleListOperations(client)
 	case "browse_catalog":
 		return handleBrowseCatalog(client, params)
+	case "browse_catalog_enhanced":
+		return handleBrowseEnhancedCatalog(client, params)
+	case "get_catalog_entry":
+		return handleGetCatalogEntry(client, params)
+	case "list_catalog_categories":
+		return handleListCatalogCategories(client)
+	case "list_catalog_tags":
+		return handleListCatalogTags(client, params)
 	case "import_from_catalog":
 		return handleImportFromCatalog(client, params)
 	case "browse_stac_catalog":
@@ -122,7 +141,7 @@ func handleQueryFeatures(client *Client, params map[string]interface{}) (string,
 		return "", err
 	}
 	qp := map[string]string{}
-	for _, key := range []string{"bbox", "filter", "limit", "offset", "properties", "sortby"} {
+	for _, key := range []string{"bbox", "filter", "datetime", "limit", "offset", "properties", "sortby"} {
 		if v, ok := params[key].(string); ok && v != "" {
 			qp[key] = v
 		}
@@ -175,6 +194,20 @@ func handleRunProcess(client *Client, params map[string]interface{}) (string, er
 }
 
 func handleRunPipeline(client *Client, params map[string]interface{}) (string, error) {
+	if _, ok := params["output_name"]; !ok {
+		if out, ok := params["output"].(string); ok && out != "" {
+			params["output_name"] = out
+		}
+	}
+	if _, ok := params["input"]; !ok {
+		if steps, ok := params["steps"].([]interface{}); ok && len(steps) > 0 {
+			if step0, ok := steps[0].(map[string]interface{}); ok {
+				if in, ok := step0["input"].(string); ok && in != "" {
+					params["input"] = in
+				}
+			}
+		}
+	}
 	data, err := client.RunPipeline(params)
 	if err != nil {
 		return "", err
@@ -183,6 +216,16 @@ func handleRunPipeline(client *Client, params map[string]interface{}) (string, e
 }
 
 func handleConvertFormat(client *Client, params map[string]interface{}) (string, error) {
+	if _, ok := params["output_format"]; !ok {
+		if format, ok := params["format"].(string); ok && format != "" {
+			params["output_format"] = format
+		}
+	}
+	if _, ok := params["output_name"]; !ok {
+		if out, ok := params["output"].(string); ok && out != "" {
+			params["output_name"] = out
+		}
+	}
 	data, err := client.ConvertFormat(params)
 	if err != nil {
 		return "", err
@@ -191,6 +234,16 @@ func handleConvertFormat(client *Client, params map[string]interface{}) (string,
 }
 
 func handleDiffDatasets(client *Client, params map[string]interface{}) (string, error) {
+	if _, ok := params["left"]; !ok {
+		if base, ok := params["base"].(string); ok && base != "" {
+			params["left"] = base
+		}
+	}
+	if _, ok := params["right"]; !ok {
+		if cmp, ok := params["compare"].(string); ok && cmp != "" {
+			params["right"] = cmp
+		}
+	}
 	data, err := client.DiffDatasets(params)
 	if err != nil {
 		return "", err
@@ -218,6 +271,22 @@ func handleListSpatialTables(client *Client) (string, error) {
 	return formatJSON(data), nil
 }
 
+func handleGetDuckDBInfo(client *Client) (string, error) {
+	data, err := client.GetDuckDBInfo()
+	if err != nil {
+		return "", err
+	}
+	return formatJSON(data), nil
+}
+
+func handleListDuckDBDatasets(client *Client) (string, error) {
+	data, err := client.ListDuckDBDatasets()
+	if err != nil {
+		return "", err
+	}
+	return formatJSON(data), nil
+}
+
 func handleGeocode(client *Client, params map[string]interface{}) (string, error) {
 	addr, err := requireString(params, "address")
 	if err != nil {
@@ -231,11 +300,11 @@ func handleGeocode(client *Client, params map[string]interface{}) (string, error
 }
 
 func handleReverseGeocode(client *Client, params map[string]interface{}) (string, error) {
-	lat, err := requireString(params, "lat")
+	lat, err := requireStringLike(params, "lat")
 	if err != nil {
 		return "", err
 	}
-	lon, err := requireString(params, "lon")
+	lon, err := requireStringLike(params, "lon")
 	if err != nil {
 		return "", err
 	}
@@ -247,7 +316,88 @@ func handleReverseGeocode(client *Client, params map[string]interface{}) (string
 }
 
 func handleComputeRoute(client *Client, params map[string]interface{}) (string, error) {
+	origin, hasOrigin := params["origin"]
+	destination, hasDestination := params["destination"]
+	if hasOrigin && hasDestination {
+		waypoints := make([][2]float64, 0, 2)
+		pt, err := parseRoutePoint(origin)
+		if err != nil {
+			return "", fmt.Errorf("origin: %w", err)
+		}
+		waypoints = append(waypoints, pt)
+
+		if raw, ok := params["waypoints"].([]interface{}); ok {
+			for i, wp := range raw {
+				pt, err := parseRoutePoint(wp)
+				if err != nil {
+					return "", fmt.Errorf("waypoints[%d]: %w", i, err)
+				}
+				waypoints = append(waypoints, pt)
+			}
+		}
+
+		pt, err = parseRoutePoint(destination)
+		if err != nil {
+			return "", fmt.Errorf("destination: %w", err)
+		}
+		waypoints = append(waypoints, pt)
+		params["waypoints"] = waypoints
+	}
 	data, err := client.ComputeRoute(params)
+	if err != nil {
+		return "", err
+	}
+	return formatJSON(data), nil
+}
+
+func handleComputeIsochrone(client *Client, params map[string]interface{}) (string, error) {
+	if origin, ok := params["origin"]; ok {
+		pt, err := parseRoutePoint(origin)
+		if err != nil {
+			return "", fmt.Errorf("origin: %w", err)
+		}
+		params["lng"] = pt[0]
+		params["lat"] = pt[1]
+	}
+	data, err := client.ComputeIsochrone(params)
+	if err != nil {
+		return "", err
+	}
+	return formatJSON(data), nil
+}
+
+func handleComputeRouteMatrix(client *Client, params map[string]interface{}) (string, error) {
+	if raw, ok := params["origins"].([]interface{}); ok {
+		pts, err := parseRoutePoints(raw)
+		if err != nil {
+			return "", fmt.Errorf("origins: %w", err)
+		}
+		params["origins"] = pts
+	}
+	if raw, ok := params["destinations"].([]interface{}); ok {
+		pts, err := parseRoutePoints(raw)
+		if err != nil {
+			return "", fmt.Errorf("destinations: %w", err)
+		}
+		params["destinations"] = pts
+	}
+	data, err := client.ComputeRouteMatrix(params)
+	if err != nil {
+		return "", err
+	}
+	return formatJSON(data), nil
+}
+
+func handleComputeServiceArea(client *Client, params map[string]interface{}) (string, error) {
+	if origin, ok := params["origin"]; ok {
+		pt, err := parseRoutePoint(origin)
+		if err != nil {
+			return "", fmt.Errorf("origin: %w", err)
+		}
+		params["lng"] = pt[0]
+		params["lat"] = pt[1]
+	}
+	data, err := client.ComputeServiceArea(params)
 	if err != nil {
 		return "", err
 	}
@@ -278,6 +428,96 @@ func requireString(params map[string]interface{}, key string) (string, error) {
 	return s, nil
 }
 
+// requireStringLike extracts a required parameter as a string, accepting strings and numbers.
+func requireStringLike(params map[string]interface{}, key string) (string, error) {
+	v, ok := params[key]
+	if !ok {
+		return "", fmt.Errorf("missing required parameter: %s", key)
+	}
+	s, err := stringify(v)
+	if err != nil {
+		return "", fmt.Errorf("parameter %s must be a string or number", key)
+	}
+	if s == "" {
+		return "", fmt.Errorf("parameter %s must not be empty", key)
+	}
+	return s, nil
+}
+
+func parseRoutePoint(v interface{}) ([2]float64, error) {
+	if arr, ok := v.([]interface{}); ok {
+		if len(arr) != 2 {
+			return [2]float64{}, fmt.Errorf("array form must have 2 numbers [lon,lat]")
+		}
+		lon, err := parseFloat64(arr[0])
+		if err != nil {
+			return [2]float64{}, fmt.Errorf("invalid lon")
+		}
+		lat, err := parseFloat64(arr[1])
+		if err != nil {
+			return [2]float64{}, fmt.Errorf("invalid lat")
+		}
+		return [2]float64{lon, lat}, nil
+	}
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return [2]float64{}, fmt.Errorf("must be an object with lat/lon")
+	}
+	latRaw, ok := m["lat"]
+	if !ok {
+		return [2]float64{}, fmt.Errorf("missing lat")
+	}
+	lonRaw, ok := m["lon"]
+	if !ok {
+		return [2]float64{}, fmt.Errorf("missing lon")
+	}
+	lat, err := parseFloat64(latRaw)
+	if err != nil {
+		return [2]float64{}, fmt.Errorf("invalid lat")
+	}
+	lon, err := parseFloat64(lonRaw)
+	if err != nil {
+		return [2]float64{}, fmt.Errorf("invalid lon")
+	}
+	return [2]float64{lon, lat}, nil
+}
+
+func parseRoutePoints(values []interface{}) ([][2]float64, error) {
+	pts := make([][2]float64, 0, len(values))
+	for i, v := range values {
+		pt, err := parseRoutePoint(v)
+		if err != nil {
+			return nil, fmt.Errorf("index %d: %w", i, err)
+		}
+		pts = append(pts, pt)
+	}
+	return pts, nil
+}
+
+func parseFloat64(v interface{}) (float64, error) {
+	s, err := stringify(v)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseFloat(s, 64)
+}
+
+func stringify(v interface{}) (string, error) {
+	if s, ok := v.(string); ok {
+		return s, nil
+	}
+	if f, ok := v.(float64); ok {
+		return strconv.FormatFloat(f, 'f', -1, 64), nil
+	}
+	if b, ok := v.(bool); ok {
+		if b {
+			return "true", nil
+		}
+		return "false", nil
+	}
+	return "", fmt.Errorf("unsupported type")
+}
+
 func handleBrowseCatalog(client *Client, params map[string]interface{}) (string, error) {
 	qp := map[string]string{}
 	for _, key := range []string{"search", "category", "limit", "offset"} {
@@ -286,6 +526,57 @@ func handleBrowseCatalog(client *Client, params map[string]interface{}) (string,
 		}
 	}
 	data, err := client.BrowseCatalog(qp)
+	if err != nil {
+		return "", err
+	}
+	return formatJSON(data), nil
+}
+
+func handleBrowseEnhancedCatalog(client *Client, params map[string]interface{}) (string, error) {
+	qp := map[string]string{}
+	for _, key := range []string{"search", "category", "formats", "tags", "live_only", "sort", "order", "bbox", "limit", "offset"} {
+		if v, ok := params[key]; ok {
+			s, err := stringify(v)
+			if err == nil && s != "" {
+				qp[key] = s
+			}
+		}
+	}
+	data, err := client.BrowseEnhancedCatalog(qp)
+	if err != nil {
+		return "", err
+	}
+	return formatJSON(data), nil
+}
+
+func handleGetCatalogEntry(client *Client, params map[string]interface{}) (string, error) {
+	id, err := requireString(params, "id")
+	if err != nil {
+		return "", err
+	}
+	data, err := client.GetCatalogEntry(id)
+	if err != nil {
+		return "", err
+	}
+	return formatJSON(data), nil
+}
+
+func handleListCatalogCategories(client *Client) (string, error) {
+	data, err := client.ListCatalogCategories()
+	if err != nil {
+		return "", err
+	}
+	return formatJSON(data), nil
+}
+
+func handleListCatalogTags(client *Client, params map[string]interface{}) (string, error) {
+	limit := ""
+	if v, ok := params["limit"]; ok {
+		if s, err := stringify(v); err == nil {
+			limit = s
+		}
+	}
+	data, err := client.ListCatalogTags(limit)
 	if err != nil {
 		return "", err
 	}
