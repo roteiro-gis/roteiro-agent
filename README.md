@@ -96,11 +96,20 @@ Add to `.mcp.json`:
 | `diff_datasets` | Compare two dataset versions |
 | `execute_sql` | Run PostGIS SQL query |
 | `list_spatial_tables` | List spatial tables in the database |
+| `get_duckdb_info` | DuckDB SQL engine status/capabilities |
+| `list_duckdb_datasets` | Datasets available to DuckDB SQL |
 | `geocode` | Address to coordinates |
 | `reverse_geocode` | Coordinates to address |
 | `compute_route` | Driving/walking route computation |
+| `compute_isochrone` | Travel-time isochrone polygons |
+| `compute_route_matrix` | Origin-destination time/distance matrix |
+| `compute_service_area` | Distance-based service area polygons |
 | `list_operations` | Available geoprocessing operations |
 | `browse_catalog` | Browse the built-in data catalog |
+| `browse_catalog_enhanced` | Browse enhanced catalog with filters |
+| `get_catalog_entry` | Get enhanced catalog entry by ID |
+| `list_catalog_categories` | List catalog categories |
+| `list_catalog_tags` | List catalog tags |
 | `import_from_catalog` | Import a dataset from the data catalog |
 | `browse_stac_catalog` | Browse a remote STAC catalog |
 | `browse_stac_collections` | List collections in a remote STAC catalog |

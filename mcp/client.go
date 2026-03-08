@@ -18,10 +18,10 @@ import (
 
 // Client is a thin HTTP wrapper for the Cairn REST API.
 type Client struct {
-	BaseURL    string
-	APIKey     string
+	BaseURL       string
+	APIKey        string
 	SessionCookie string
-	HTTPClient *http.Client
+	HTTPClient    *http.Client
 }
 
 // NewClient creates a Client with sensible defaults.
@@ -196,7 +196,7 @@ func (c *Client) ConvertFormat(payload interface{}) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if code != http.StatusOK {
+	if code != http.StatusOK && code != http.StatusCreated {
 		return nil, fmt.Errorf("POST /api/convert returned %d: %s", code, truncate(body, 500))
 	}
 	return json.RawMessage(body), nil
@@ -214,26 +214,63 @@ func (c *Client) DiffDatasets(payload interface{}) (json.RawMessage, error) {
 	return json.RawMessage(body), nil
 }
 
-// ExecuteSQL calls POST /api/sql/query.
+// ExecuteSQL calls POST /api/query/sql.
 func (c *Client) ExecuteSQL(query string) (json.RawMessage, error) {
-	body, code, err := c.postJSON("/api/sql/query", map[string]string{"query": query})
+	body, code, err := c.postJSON("/api/query/sql", map[string]string{"sql": query})
 	if err != nil {
 		return nil, err
 	}
+	if code == http.StatusNotFound || code == http.StatusMethodNotAllowed {
+		// Backward compatibility for older Cairn deployments.
+		body, code, err = c.postJSON("/api/sql/query", map[string]string{"sql": query})
+		if err != nil {
+			return nil, err
+		}
+	}
 	if code != http.StatusOK {
-		return nil, fmt.Errorf("POST /api/sql/query returned %d: %s", code, truncate(body, 500))
+		return nil, fmt.Errorf("POST SQL query endpoint returned %d: %s", code, truncate(body, 500))
 	}
 	return json.RawMessage(body), nil
 }
 
-// ListSpatialTables calls GET /api/sql/tables.
+// ListSpatialTables calls GET /api/sql/tables (or fallback /api/query/sql/datasets).
 func (c *Client) ListSpatialTables() (json.RawMessage, error) {
 	body, code, err := c.get("/api/sql/tables", nil)
 	if err != nil {
 		return nil, err
 	}
+	if code == http.StatusNotFound || code == http.StatusMethodNotAllowed {
+		body, code, err = c.get("/api/query/sql/datasets", nil)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if code != http.StatusOK {
-		return nil, fmt.Errorf("GET /api/sql/tables returned %d: %s", code, truncate(body, 500))
+		return nil, fmt.Errorf("GET SQL tables endpoint returned %d: %s", code, truncate(body, 500))
+	}
+	return json.RawMessage(body), nil
+}
+
+// GetDuckDBInfo calls GET /api/query/sql/info.
+func (c *Client) GetDuckDBInfo() (json.RawMessage, error) {
+	body, code, err := c.get("/api/query/sql/info", nil)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("GET /api/query/sql/info returned %d: %s", code, truncate(body, 500))
+	}
+	return json.RawMessage(body), nil
+}
+
+// ListDuckDBDatasets calls GET /api/query/sql/datasets.
+func (c *Client) ListDuckDBDatasets() (json.RawMessage, error) {
+	body, code, err := c.get("/api/query/sql/datasets", nil)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("GET /api/query/sql/datasets returned %d: %s", code, truncate(body, 500))
 	}
 	return json.RawMessage(body), nil
 }
@@ -270,6 +307,42 @@ func (c *Client) ComputeRoute(payload interface{}) (json.RawMessage, error) {
 	}
 	if code != http.StatusOK {
 		return nil, fmt.Errorf("POST /api/route returned %d: %s", code, truncate(body, 500))
+	}
+	return json.RawMessage(body), nil
+}
+
+// ComputeIsochrone calls POST /api/route/isochrone.
+func (c *Client) ComputeIsochrone(payload interface{}) (json.RawMessage, error) {
+	body, code, err := c.postJSON("/api/route/isochrone", payload)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("POST /api/route/isochrone returned %d: %s", code, truncate(body, 500))
+	}
+	return json.RawMessage(body), nil
+}
+
+// ComputeRouteMatrix calls POST /api/route/matrix.
+func (c *Client) ComputeRouteMatrix(payload interface{}) (json.RawMessage, error) {
+	body, code, err := c.postJSON("/api/route/matrix", payload)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("POST /api/route/matrix returned %d: %s", code, truncate(body, 500))
+	}
+	return json.RawMessage(body), nil
+}
+
+// ComputeServiceArea calls POST /api/route/service-area.
+func (c *Client) ComputeServiceArea(payload interface{}) (json.RawMessage, error) {
+	body, code, err := c.postJSON("/api/route/service-area", payload)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("POST /api/route/service-area returned %d: %s", code, truncate(body, 500))
 	}
 	return json.RawMessage(body), nil
 }
@@ -328,13 +401,71 @@ func (c *Client) BrowseCatalog(params map[string]string) (json.RawMessage, error
 	return json.RawMessage(body), nil
 }
 
+// BrowseEnhancedCatalog calls GET /api/catalog/enhanced.
+func (c *Client) BrowseEnhancedCatalog(params map[string]string) (json.RawMessage, error) {
+	q := url.Values{}
+	for k, v := range params {
+		if v != "" {
+			q.Set(k, v)
+		}
+	}
+	body, code, err := c.get("/api/catalog/enhanced", q)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("GET /api/catalog/enhanced returned %d: %s", code, truncate(body, 500))
+	}
+	return json.RawMessage(body), nil
+}
+
+// GetCatalogEntry calls GET /api/catalog/enhanced/{id}.
+func (c *Client) GetCatalogEntry(id string) (json.RawMessage, error) {
+	body, code, err := c.get("/api/catalog/enhanced/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("GET /api/catalog/enhanced/%s returned %d: %s", id, code, truncate(body, 500))
+	}
+	return json.RawMessage(body), nil
+}
+
+// ListCatalogCategories calls GET /api/catalog/categories.
+func (c *Client) ListCatalogCategories() (json.RawMessage, error) {
+	body, code, err := c.get("/api/catalog/categories", nil)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("GET /api/catalog/categories returned %d: %s", code, truncate(body, 500))
+	}
+	return json.RawMessage(body), nil
+}
+
+// ListCatalogTags calls GET /api/catalog/tags.
+func (c *Client) ListCatalogTags(limit string) (json.RawMessage, error) {
+	q := url.Values{}
+	if limit != "" {
+		q.Set("limit", limit)
+	}
+	body, code, err := c.get("/api/catalog/tags", q)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("GET /api/catalog/tags returned %d: %s", code, truncate(body, 500))
+	}
+	return json.RawMessage(body), nil
+}
+
 // ImportFromCatalog calls POST /api/catalog/import.
 func (c *Client) ImportFromCatalog(catalogID string) (json.RawMessage, error) {
 	body, code, err := c.postJSON("/api/catalog/import", map[string]string{"catalog_id": catalogID})
 	if err != nil {
 		return nil, err
 	}
-	if code != http.StatusOK && code != http.StatusCreated {
+	if code != http.StatusOK && code != http.StatusCreated && code != http.StatusAccepted {
 		return nil, fmt.Errorf("POST /api/catalog/import returned %d: %s", code, truncate(body, 500))
 	}
 	return json.RawMessage(body), nil
@@ -395,7 +526,7 @@ func (c *Client) ImportSTACAsset(assetURL, name, format string) (json.RawMessage
 	if err != nil {
 		return nil, err
 	}
-	if code != http.StatusOK && code != http.StatusCreated {
+	if code != http.StatusOK && code != http.StatusCreated && code != http.StatusAccepted {
 		return nil, fmt.Errorf("POST /api/stac/import returned %d: %s", code, truncate(body, 500))
 	}
 	return json.RawMessage(body), nil

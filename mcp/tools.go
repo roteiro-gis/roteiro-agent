@@ -74,6 +74,7 @@ func AllTools() []Tool {
 					"collection_id": {Type: "string", Description: "The collection identifier."},
 					"bbox":          {Type: "string", Description: "Bounding box filter as 'west,south,east,north' (EPSG:4326)."},
 					"filter":        {Type: "string", Description: "CQL2 filter expression (e.g. \"population > 10000\")."},
+					"datetime":      {Type: "string", Description: "Temporal filter as RFC3339 instant or interval 'start/end'."},
 					"limit":         {Type: "string", Description: "Maximum number of features to return (default 10)."},
 					"offset":        {Type: "string", Description: "Number of features to skip for pagination."},
 					"properties":    {Type: "string", Description: "Comma-separated list of properties to include in the response."},
@@ -128,6 +129,7 @@ func AllTools() []Tool {
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
+					"input": {Type: "string", Description: "Input dataset name."},
 					"steps": {
 						Type:        "array",
 						Description: "Array of pipeline steps, each with 'operation', 'input' (or uses previous output), and 'params'.",
@@ -141,8 +143,10 @@ func AllTools() []Tool {
 							},
 						},
 					},
+					"output":   {Type: "string", Description: "Output dataset name when registering results (optional)."},
+					"register": {Type: "boolean", Description: "Persist the pipeline result as a dataset."},
 				},
-				Required: []string{"steps"},
+				Required: []string{"input", "steps"},
 			},
 		},
 		{
@@ -151,8 +155,10 @@ func AllTools() []Tool {
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"input":  {Type: "string", Description: "Input dataset name."},
-					"format": {Type: "string", Description: "Target format (e.g. 'geojson', 'shapefile', 'geopackage', 'kml', 'csv', 'flatgeobuf', 'parquet')."},
+					"input":    {Type: "string", Description: "Input dataset name."},
+					"format":   {Type: "string", Description: "Target format (e.g. 'geojson', 'shapefile', 'geopackage', 'kml', 'csv', 'flatgeobuf', 'parquet')."},
+					"output":   {Type: "string", Description: "Optional output dataset name when registering results."},
+					"register": {Type: "boolean", Description: "Persist converted output as a dataset."},
 				},
 				Required: []string{"input", "format"},
 			},
@@ -163,8 +169,9 @@ func AllTools() []Tool {
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"base":    {Type: "string", Description: "Base dataset name (the 'before' version)."},
-					"compare": {Type: "string", Description: "Compare dataset name (the 'after' version)."},
+					"base":        {Type: "string", Description: "Base dataset name (the 'before' version)."},
+					"compare":     {Type: "string", Description: "Compare dataset name (the 'after' version)."},
+					"match_field": {Type: "string", Description: "Optional stable feature ID field for matching rows."},
 				},
 				Required: []string{"base", "compare"},
 			},
@@ -186,6 +193,16 @@ func AllTools() []Tool {
 			InputSchema: InputSchema{Type: "object"},
 		},
 		{
+			Name:        "get_duckdb_info",
+			Description: "Get DuckDB SQL engine status, capabilities, supported functions, and safety limits.",
+			InputSchema: InputSchema{Type: "object"},
+		},
+		{
+			Name:        "list_duckdb_datasets",
+			Description: "List datasets available to the DuckDB SQL endpoint (/api/query/sql/datasets).",
+			InputSchema: InputSchema{Type: "object"},
+		},
+		{
 			Name:        "geocode",
 			Description: "Forward geocode: convert an address or place name to geographic coordinates (latitude/longitude).",
 			InputSchema: InputSchema{
@@ -202,8 +219,8 @@ func AllTools() []Tool {
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"lat": {Type: "string", Description: "Latitude."},
-					"lon": {Type: "string", Description: "Longitude."},
+					"lat": {Type: "number", Description: "Latitude."},
+					"lon": {Type: "number", Description: "Longitude."},
 				},
 				Required: []string{"lat", "lon"},
 			},
@@ -218,12 +235,67 @@ func AllTools() []Tool {
 					"destination": {Type: "object", Description: "Destination point as {\"lat\": number, \"lon\": number}."},
 					"waypoints": {
 						Type:        "array",
-						Description: "Optional intermediate waypoints.",
+						Description: "Optional intermediate waypoints as [{\"lat\": number, \"lon\": number}, ...].",
 						Items:       &PropertySchema{Type: "object"},
 					},
 					"profile": {Type: "string", Description: "Routing profile: 'driving', 'walking', 'cycling' (default: 'driving')."},
 				},
 				Required: []string{"origin", "destination"},
+			},
+		},
+		{
+			Name:        "compute_isochrone",
+			Description: "Compute travel-time isochrone polygons from an origin point.",
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]PropertySchema{
+					"origin": {Type: "object", Description: "Origin point as {\"lat\": number, \"lon\": number}."},
+					"minutes": {
+						Type:        "array",
+						Description: "Travel-time thresholds in minutes (1-120).",
+						Items:       &PropertySchema{Type: "number"},
+					},
+					"profile": {Type: "string", Description: "Routing profile: 'driving', 'walking', 'cycling' (default: 'driving')."},
+				},
+				Required: []string{"origin", "minutes"},
+			},
+		},
+		{
+			Name:        "compute_route_matrix",
+			Description: "Compute origin-destination travel-time and distance matrices.",
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]PropertySchema{
+					"origins": {
+						Type:        "array",
+						Description: "Origin points as [{\"lat\": number, \"lon\": number}, ...].",
+						Items:       &PropertySchema{Type: "object"},
+					},
+					"destinations": {
+						Type:        "array",
+						Description: "Destination points as [{\"lat\": number, \"lon\": number}, ...].",
+						Items:       &PropertySchema{Type: "object"},
+					},
+					"profile": {Type: "string", Description: "Routing profile: 'driving', 'walking', 'cycling' (default: 'driving')."},
+				},
+				Required: []string{"origins", "destinations"},
+			},
+		},
+		{
+			Name:        "compute_service_area",
+			Description: "Compute distance-based service area polygons from an origin point.",
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]PropertySchema{
+					"origin": {Type: "object", Description: "Origin point as {\"lat\": number, \"lon\": number}."},
+					"meters": {
+						Type:        "array",
+						Description: "Distance thresholds in meters (1-100000).",
+						Items:       &PropertySchema{Type: "number"},
+					},
+					"profile": {Type: "string", Description: "Routing profile: 'driving', 'walking', 'cycling' (default: 'driving')."},
+				},
+				Required: []string{"origin", "meters"},
 			},
 		},
 		{
@@ -241,6 +313,51 @@ func AllTools() []Tool {
 					"category": {Type: "string", Description: "Filter by category (e.g. 'boundaries', 'transportation', 'environment')."},
 					"limit":    {Type: "string", Description: "Maximum results to return (default 50, max 500)."},
 					"offset":   {Type: "string", Description: "Pagination offset."},
+				},
+			},
+		},
+		{
+			Name:        "browse_catalog_enhanced",
+			Description: "Browse the enhanced catalog with advanced filters (formats, tags, live_only, bbox, sorting).",
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]PropertySchema{
+					"search":    {Type: "string", Description: "Text search query."},
+					"category":  {Type: "string", Description: "Category filter."},
+					"formats":   {Type: "string", Description: "Comma-separated formats (e.g. 'geojson,parquet')."},
+					"tags":      {Type: "string", Description: "Comma-separated tags filter."},
+					"live_only": {Type: "boolean", Description: "Only include live/updating datasets."},
+					"sort":      {Type: "string", Description: "Sort key: popularity, name, recent, updated."},
+					"order":     {Type: "string", Description: "Sort order: asc or desc."},
+					"bbox":      {Type: "string", Description: "Bounding box filter as 'minLon,minLat,maxLon,maxLat'."},
+					"limit":     {Type: "string", Description: "Maximum results (1-500)."},
+					"offset":    {Type: "string", Description: "Pagination offset."},
+				},
+			},
+		},
+		{
+			Name:        "get_catalog_entry",
+			Description: "Get a single enhanced catalog entry by ID.",
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]PropertySchema{
+					"id": {Type: "string", Description: "Enhanced catalog entry ID."},
+				},
+				Required: []string{"id"},
+			},
+		},
+		{
+			Name:        "list_catalog_categories",
+			Description: "List available catalog categories.",
+			InputSchema: InputSchema{Type: "object"},
+		},
+		{
+			Name:        "list_catalog_tags",
+			Description: "List catalog tags ordered by frequency.",
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]PropertySchema{
+					"limit": {Type: "string", Description: "Maximum tags to return (1-200)."},
 				},
 			},
 		},
